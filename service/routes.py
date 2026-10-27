@@ -1,3 +1,4 @@
+
 ######################################################################
 # Copyright 2016, 2022 John J. Rofrano. All Rights Reserved.
 #
@@ -6,27 +7,20 @@
 # You may obtain a copy of the License at
 #
 # https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 ######################################################################
 
-# spell: ignore Rofrano jsonify restx dbname
 """
 Product Store Service with UI
 """
-from flask import jsonify, request, abort
-from flask import url_for  # noqa: F401 pylint: disable=unused-import
-from service.models import Product
-from service.common import status  # HTTP Status Codes
+
+from flask import jsonify, request, abort, url_for
+from service.models import Product, Category, DataValidationError
+from service.common import status
 from . import app
 
 
 ######################################################################
-# H E A L T H   C H E C K
+# HEALTH CHECK
 ######################################################################
 @app.route("/health")
 def healthcheck():
@@ -35,7 +29,7 @@ def healthcheck():
 
 
 ######################################################################
-# H O M E   P A G E
+# HOME PAGE
 ######################################################################
 @app.route("/")
 def index():
@@ -44,85 +38,143 @@ def index():
 
 
 ######################################################################
-#  U T I L I T Y   F U N C T I O N S
+# UTILITY FUNCTIONS
 ######################################################################
 def check_content_type(content_type):
     """Checks that the media type is correct"""
-    if "Content-Type" not in request.headers:
-        app.logger.error("No Content-Type specified.")
+    if request.headers.get("Content-Type") != content_type:
+        app.logger.error("Invalid or missing Content-Type")
         abort(
             status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             f"Content-Type must be {content_type}",
         )
 
-    if request.headers["Content-Type"] == content_type:
-        return
 
-    app.logger.error("Invalid Content-Type: %s", request.headers["Content-Type"])
-    abort(
-        status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-        f"Content-Type must be {content_type}",
+######################################################################
+# CREATE A NEW PRODUCT
+######################################################################
+@app.route("/products", methods=["POST"])
+def create_products():
+    """Creates a Product"""
+    app.logger.info("Request to Create a Product...")
+    check_content_type("application/json")
+
+    data = request.get_json(silent=True)
+    if not data:
+        abort(status.HTTP_400_BAD_REQUEST, "Invalid or missing JSON data")
+
+    product = Product()
+    try:
+        product.deserialize(data)
+        product.create()
+    except (DataValidationError, ValueError) as error:
+        abort(status.HTTP_400_BAD_REQUEST, str(error))
+
+    message = product.serialize()
+    location_url = url_for(
+        "get_product", product_id=product.id, _external=True
+    )
+
+    return (
+        jsonify(message),
+        status.HTTP_201_CREATED,
+        {"Location": location_url},
     )
 
 
 ######################################################################
-# C R E A T E   A   N E W   P R O D U C T
+# LIST ALL PRODUCTS AND SEARCH PRODUCTS
 ######################################################################
-@app.route("/products", methods=["POST"])
-def create_products():
-    """
-    Creates a Product
-    This endpoint will create a Product based the data in the body that is posted
-    """
-    app.logger.info("Request to Create a Product...")
+@app.route("/products", methods=["GET"])
+def list_products():
+    """Returns all products or filters by name, category, or availability"""
+    app.logger.info("Request to list Products...")
+
+    products = Product.all()
+
+    # Search by name
+    name = request.args.get("name")
+    if name:
+        products = Product.find_by_name(name).all()
+
+    # Search by category
+    category = request.args.get("category")
+    if category:
+        try:
+            category_value = Category[category.upper()]
+        except KeyError:
+            abort(status.HTTP_400_BAD_REQUEST, "Invalid product category")
+        products = Product.find_by_category(category_value).all()
+
+    # Search by availability
+    available = request.args.get("available")
+    if available is not None:
+        available_value = available.lower()
+        if available_value not in ("true", "false"):
+            abort(
+                status.HTTP_400_BAD_REQUEST,
+                "Availability must be true or false",
+            )
+        products = Product.find_by_availability(
+            available_value == "true"
+        ).all()
+
+    return jsonify([product.serialize() for product in products]), status.HTTP_200_OK
+
+
+######################################################################
+# READ A PRODUCT
+######################################################################
+@app.route("/products/<int:product_id>", methods=["GET"])
+def get_product(product_id):
+    """Reads a single Product"""
+    app.logger.info("Request to Read Product id=%s", product_id)
+
+    product = Product.find(product_id)
+    if product is None:
+        abort(status.HTTP_404_NOT_FOUND, "Product not found")
+
+    return jsonify(product.serialize()), status.HTTP_200_OK
+
+
+######################################################################
+# UPDATE A PRODUCT
+######################################################################
+@app.route("/products/<int:product_id>", methods=["PUT"])
+def update_product(product_id):
+    """Updates an existing Product"""
+    app.logger.info("Request to Update Product id=%s", product_id)
     check_content_type("application/json")
 
-    data = request.get_json()
-    app.logger.info("Processing: %s", data)
-    product = Product()
-    product.deserialize(data)
-    product.create()
-    app.logger.info("Product with new id [%s] saved!", product.id)
+    product = Product.find(product_id)
+    if product is None:
+        abort(status.HTTP_404_NOT_FOUND, "Product not found")
 
-    message = product.serialize()
+    data = request.get_json(silent=True)
+    if not data:
+        abort(status.HTTP_400_BAD_REQUEST, "Invalid or missing JSON data")
 
-    #
-    # Uncomment this line of code once you implement READ A PRODUCT
-    #
-    # location_url = url_for("get_products", product_id=product.id, _external=True)
-    location_url = "/"  # delete once READ is implemented
-    return jsonify(message), status.HTTP_201_CREATED, {"Location": location_url}
+    try:
+        product.deserialize(data)
+        product.id = product_id
+        product.update()
+    except (DataValidationError, ValueError) as error:
+        abort(status.HTTP_400_BAD_REQUEST, str(error))
+
+    return jsonify(product.serialize()), status.HTTP_200_OK
 
 
 ######################################################################
-# L I S T   A L L   P R O D U C T S
+# DELETE A PRODUCT
 ######################################################################
+@app.route("/products/<int:product_id>", methods=["DELETE"])
+def delete_product(product_id):
+    """Deletes a Product"""
+    app.logger.info("Request to Delete Product id=%s", product_id)
 
-#
-# PLACE YOUR CODE TO LIST ALL PRODUCTS HERE
-#
+    product = Product.find(product_id)
+    if product is None:
+        abort(status.HTTP_404_NOT_FOUND, "Product not found")
 
-######################################################################
-# R E A D   A   P R O D U C T
-######################################################################
-
-#
-# PLACE YOUR CODE HERE TO READ A PRODUCT
-#
-
-######################################################################
-# U P D A T E   A   P R O D U C T
-######################################################################
-
-#
-# PLACE YOUR CODE TO UPDATE A PRODUCT HERE
-#
-
-######################################################################
-# D E L E T E   A   P R O D U C T
-######################################################################
-
-
-#
-# PLACE YOUR CODE TO DELETE A PRODUCT HERE
-#
+    product.delete()
+    return "", status.HTTP_204_NO_CONTENT
